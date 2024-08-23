@@ -8,7 +8,7 @@ Before deploying this project, you need to:
 
 1. Have an AWS account with appropriate permissions to create and manage the required services.
 2. Train and deploy an Amazon Personalize campaign using the previously provided Jupyter notebooks.
-3. Have the AWS CloudFormation template (`cf.yaml`) and the HTML file (`index.html`) ready.
+3. Have the AWS CloudFormation template (`Recommender_Demo_Cloudformation.yaml`) and the HTML file (`index.html`) ready.
 
 ## Deployment Steps
 
@@ -19,7 +19,7 @@ Before deploying this project, you need to:
 2. **Deploy CloudFormation Stack**
    - Sign in to the AWS Management Console and navigate to the CloudFormation service.
    - Click "Create stack" and choose "With new resources (standard)".
-   - Under "Specify template", choose "Upload a template file" and upload your `cf.yaml` file.
+   - Under "Specify template", choose "Upload a template file" and upload your `Recommender_Demo_Cloudformation.yaml` file.
    - Click "Next".
    - Enter a Stack name (e.g., "ProductRecommenderStack").
    - Under "Parameters", enter:
@@ -37,7 +37,7 @@ Before deploying this project, you need to:
 4. **Update API Endpoint**
    - In the AWS CloudFormation console, go to the Outputs tab of your stack.
    - Find the `ApiUrl` output value.
-   - Open the `index.html` file locally and replace the placeholder API URL with the actual URL from the CloudFormation output.
+   - Open the `index.html` file locally and replace the placeholder API URL (INSERT_YOUR_API_ADDRESS_HERE) with the actual URL from the CloudFormation output.
    - Re-upload the updated `index.html` to your S3 bucket following step 3.
 
 5. **Access the Website**
