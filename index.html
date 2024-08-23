@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Product Recommender</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        h1 { text-align: center; }
+        form { margin-bottom: 20px; }
+        label { display: block; margin-top: 10px; }
+        input, select { width: 100%; padding: 5px; margin-top: 5px; }
+        button { display: block; width: 100%; padding: 10px; margin-top: 20px; }
+        #recommendations { margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <h1>Product Recommender</h1>
+    <form id="recommenderForm">
+        <label for="userId">User ID:</label>
+        <input type="text" id="userId" required>
+
+        <label for="requestType">Request Type:</label>
+        <select id="requestType" required>
+            <option value="products">Select Products</option>
+            <option value="metadata">Provide Metadata</option>
+            <option value="both">Both Products and Metadata</option>
+        </select>
+
+        <div id="productsSection" style="display:none;">
+            <label for="selectedProducts">Selected Products (comma-separated):</label>
+            <input type="text" id="selectedProducts">
+        </div>
+
+        <div id="metadataSection" style="display:none;">
+            <label for="age">Age:</label>
+            <input type="number" id="age">
+
+            <label for="gender">Gender:</label>
+            <select id="gender">
+                <option value="">Select...</option>
+                <option value="male">Male</option>
+                <option value="female">Female</option>
+                <option value="other">Other</option>
+            </select>
+
+            <label for="location">Location:</label>
+            <input type="text" id="location">
+        </div>
+
+        <button type="submit">Get Recommendations</button>
+    </form>
+
+    <div id="recommendations"></div>
+
+    <script>
+        $(document).ready(function() {
+            $('#requestType').change(function() {
+                const type = $(this).val();
+                $('#productsSection').toggle(type === 'products' || type === 'both');
+                $('#metadataSection').toggle(type === 'metadata' || type === 'both');
+            });
+
+            $('#recommenderForm').submit(function(e) {
+                e.preventDefault();
+                const userId = $('#userId').val();
+                const requestType = $('#requestType').val();
+                const selectedProducts = $('#selectedProducts').val().split(',').map(p => p.trim());
+                const metadata = {
+                    age: $('#age').val(),
+                    gender: $('#gender').val(),
+                    location: $('#location').val()
+                };
+
+                const data = {
+                    userId: userId,
+                    type: requestType,
+                    selectedProducts: selectedProducts,
+                    metadata: metadata
+                };
+
+                $.ajax({
+                    url: 'https://st7ie53ef4.execute-api.us-east-1.amazonaws.com/prod/recommend',
+                    type: 'POST',
+                    data: JSON.stringify(data),
+                    contentType: 'application/json',
+                    crossDomain: true,
+                    xhrFields: {
+                        withCredentials: false
+                    },
+                    success: function(response) {
+                        $('#recommendations').html('<p>Recommendations request submitted. Check your DynamoDB table for results.</p>');
+                    },
+                    error: function(xhr, status, error) {
+                        $('#recommendations').html('<p>Error: ' + error + '</p>');
+                    }
+                });
+            });
+        });
+    </script>
+</body>
+</html>

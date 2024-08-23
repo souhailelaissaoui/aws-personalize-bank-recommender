@@ -1,0 +1,392 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template for Amazon Personalize recommender system with UI
+
+Parameters:
+  PersonalizeCampaignArn:
+    Type: String
+    Description: The ARN of your Amazon Personalize campaign
+  BucketName:
+    Type: String
+    Description: Name of the S3 bucket to host the website
+
+Resources:
+  # DynamoDB Table
+  RecommendationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: PersonalizeRecommendations
+      AttributeDefinitions:
+        - AttributeName: UserId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: UserId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  # IAM Roles
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: PersonalizeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - personalize:GetRecommendations
+                Resource: '*'
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt RecommendationsTable.Arn
+        - PolicyName: StepFunctionsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: '*'
+
+  StepFunctionsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: '*'
+
+  # Lambda Functions
+  InputProcessorFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaExecutionRole
+    Properties:
+      FunctionName: InputProcessor
+      Runtime: python3.8
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          def handler(event, context):
+              # Process input data
+              return {
+                  'userId': event['userId']
+              }
+
+  RecommendationFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaExecutionRole
+    Properties:
+      FunctionName: GetRecommendation
+      Runtime: python3.8
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          def handler(event, context):
+              personalize_runtime = boto3.client('personalize-runtime')
+              response = personalize_runtime.get_recommendations(
+                  campaignArn=os.environ['PERSONALIZE_CAMPAIGN_ARN'],
+                  userId=event['userId']
+              )
+              return {
+                  'UserId': event['userId'],
+                  'recommendations': response['itemList']
+              }
+      Environment:
+        Variables:
+          PERSONALIZE_CAMPAIGN_ARN: !Ref PersonalizeCampaignArn
+
+  WriteToDynamoDBFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaExecutionRole
+    Properties:
+      FunctionName: WriteToDynamoDB
+      Runtime: python3.8
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          from decimal import Decimal
+
+          def float_to_decimal(obj):
+              if isinstance(obj, float):
+                  return Decimal(str(obj))
+              elif isinstance(obj, dict):
+                  return {k: float_to_decimal(v) for k, v in obj.items()}
+              elif isinstance(obj, list):
+                  return [float_to_decimal(v) for v in obj]
+              return obj
+
+          def handler(event, context):
+              dynamodb = boto3.resource('dynamodb')
+              table = dynamodb.Table('PersonalizeRecommendations')
+              
+              # Convert any float values to Decimal
+              item = float_to_decimal(event)
+              
+              table.put_item(Item=item)
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Recommendations written to DynamoDB')
+              }
+
+  # Step Functions State Machine
+  RecommenderStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn: 
+      - InputProcessorFunction
+      - RecommendationFunction
+      - WriteToDynamoDBFunction
+      - StepFunctionsExecutionRole
+    Properties:
+      DefinitionString: !Sub
+        - |-
+          {
+            "Comment": "A state machine for generating and storing personalized recommendations",
+            "StartAt": "ProcessInput",
+            "States": {
+              "ProcessInput": {
+                "Type": "Task",
+                "Resource": "${InputProcessorFunctionArn}",
+                "Next": "GetRecommendation"
+              },
+              "GetRecommendation": {
+                "Type": "Task",
+                "Resource": "${RecommendationFunctionArn}",
+                "Next": "WriteToDynamoDB"
+              },
+              "WriteToDynamoDB": {
+                "Type": "Task",
+                "Resource": "${WriteToDynamoDBFunctionArn}",
+                "End": true
+              }
+            }
+          }
+        - InputProcessorFunctionArn: !GetAtt InputProcessorFunction.Arn
+          RecommendationFunctionArn: !GetAtt RecommendationFunction.Arn
+          WriteToDynamoDBFunctionArn: !GetAtt WriteToDynamoDBFunction.Arn
+      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+
+  # API Handler Lambda
+  ApiHandlerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: 
+      - LambdaExecutionRole
+      - RecommenderStateMachine
+    Properties:
+      FunctionName: ApiHandler
+      Runtime: python3.8
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          def handler(event, context):
+              # For preflight OPTIONS request
+              if event['httpMethod'] == 'OPTIONS':
+                  return {
+                      'statusCode': 200,
+                      'headers': {
+                          'Access-Control-Allow-Origin': '*',
+                          'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+                          'Access-Control-Allow-Methods': 'OPTIONS,POST'
+                      },
+                      'body': json.dumps('OK')
+                  }
+
+              # Extract data from the event
+              body = json.loads(event['body']) if event.get('body') else {}
+              request_type = body.get('type')
+              user_id = body.get('userId')
+              selected_products = body.get('selectedProducts', [])
+              metadata = body.get('metadata', {})
+
+              # Prepare input for Step Functions
+              step_functions_input = {
+                  'userId': user_id,
+                  'selectedProducts': selected_products,
+                  'metadata': metadata,
+                  'requestType': request_type
+              }
+
+              # Start Step Functions execution
+              step_functions = boto3.client('stepfunctions')
+              response = step_functions.start_execution(
+                  stateMachineArn=os.environ['STEP_FUNCTIONS_ARN'],
+                  input=json.dumps(step_functions_input)
+              )
+
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Recommendation process started'),
+                  'headers': {
+                      'Access-Control-Allow-Origin': '*',
+                      'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+                      'Access-Control-Allow-Methods': 'OPTIONS,POST'
+                  }
+              }
+      Environment:
+        Variables:
+          STEP_FUNCTIONS_ARN: !Ref RecommenderStateMachine
+
+  # API Gateway
+  RecommenderApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: RecommenderApi
+      Description: API for the recommender system
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  ApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RecommenderApi
+      ParentId: !GetAtt RecommenderApi.RootResourceId
+      PathPart: 'recommend'
+
+  ApiMethod:
+    Type: AWS::ApiGateway::Method
+    DependsOn: ApiHandlerFunction
+    Properties:
+      RestApiId: !Ref RecommenderApi
+      ResourceId: !Ref ApiResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 
+          - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+          - LambdaArn: !GetAtt ApiHandlerFunction.Arn
+
+  # Add OPTIONS method for CORS
+  ApiCorsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      ResourceId: !Ref ApiResource
+      RestApiId: !Ref RecommenderApi
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          ResponseModels:
+            application/json: 'Empty'
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: 
+      - ApiMethod
+      - ApiCorsMethod
+    Properties:
+      RestApiId: !Ref RecommenderApi
+      StageName: prod
+
+  # S3 Bucket for Website Hosting
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: ObjectWriter
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - HEAD
+            AllowedOrigins:
+              - '*'
+            MaxAge: 3000
+
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Join ['', ['arn:aws:s3:::', !Ref WebsiteBucket, '/*']]
+
+  # Allow API Gateway to invoke Lambda
+  ApiGatewayInvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: ApiHandlerFunction
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt ApiHandlerFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RecommenderApi}/*/POST/recommend
+
+Outputs:
+  WebsiteURL:
+    Value: !GetAtt WebsiteBucket.WebsiteURL
+    Description: URL for website hosted on S3
+  ApiUrl:
+    Description: URL of the API endpoint
+    Value: !Sub https://${RecommenderApi}.execute-api.${AWS::Region}.amazonaws.com/prod/recommend
