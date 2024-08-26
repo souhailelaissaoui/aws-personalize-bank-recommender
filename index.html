@@ -4,100 +4,310 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Product Recommender</title>
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/axios/0.21.1/axios.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css" rel="stylesheet">
     <style>
-        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        h1 { text-align: center; }
-        form { margin-bottom: 20px; }
-        label { display: block; margin-top: 10px; }
-        input, select { width: 100%; padding: 5px; margin-top: 5px; }
-        button { display: block; width: 100%; padding: 10px; margin-top: 20px; }
-        #recommendations { margin-top: 20px; }
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #00008B;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .loading-text {
+            text-align: center;
+            color: #00008B;
+            font-weight: bold;
+            margin-top: 10px;
+        }
+        body {
+            font-family: 'Arial', sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        h1, h2 {
+            color: #333;
+            text-align: center;
+        }
+        .logo {
+            display: block;
+            margin: 0 auto 20px;
+            max-width: 200px;
+            height: auto;
+        }
+        .request-type {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 20px;
+        }
+        .request-type label {
+            padding: 10px 20px;
+            margin: 0 5px;
+            background-color: #e0e0e0;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .request-type label.active {
+            background-color: #00008B;
+            color: white;
+        }
+        .request-type label.beta::after {
+            content: " (Beta)";
+            font-size: 0.8em;
+            color: #888;
+        }
+        .carousel {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            margin-bottom: 20px;
+        }
+        .product {
+            width: 180px;
+            margin: 5px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: #f9f9f9;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            text-align: center;
+        }
+        .product.selected {
+            background-color: #e6f7ff;
+            border-color: #1890ff;
+        }
+        .product-name {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        .product-id {
+            font-size: 0.8em;
+            color: #888;
+        }
+        button {
+            display: block;
+            width: 100%;
+            padding: 10px;
+            background-color: #00008B;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+            margin-top: 20px;
+        }
+        button:hover {
+            background-color: #000066;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #recommendations {
+            margin-top: 20px;
+            padding: 20px;
+            background-color: #f9f9f9;
+            border-radius: 4px;
+        }
+        .loading {
+            text-align: center;
+            font-style: italic;
+            color: #888;
+        }
+        .error {
+            color: red;
+            text-align: center;
+            margin-top: 10px;
+        }
+        #metadataSection {
+            text-align: center;
+            margin-top: 20px;
+            margin-bottom: 20px;
+        }
+        #metadataSection input {
+            margin: 10px;
+            padding: 5px;
+        }
+        .instruction {
+            text-align: center;
+            margin-bottom: 15px;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
-    <h1>Product Recommender</h1>
-    <form id="recommenderForm">
-        <label for="userId">User ID:</label>
-        <input type="text" id="userId" required>
+    <div class="container">
+        <img src="https://intuitive.cloud/assets/img/Intuitive%20Logo.png" alt="Company Logo" class="logo">
+        <h1>Product Recommender</h1>
 
-        <label for="requestType">Request Type:</label>
-        <select id="requestType" required>
-            <option value="products">Select Products</option>
-            <option value="metadata">Provide Metadata</option>
-            <option value="both">Both Products and Metadata</option>
-        </select>
+        <div class="request-type">
+            <label><input type="radio" name="requestType" value="products" checked> Select Products</label>
+            <label class="beta"><input type="radio" name="requestType" value="metadata"> Provide Metadata</label>
+            <label class="beta"><input type="radio" name="requestType" value="both"> Both</label>
+        </div>
 
-        <div id="productsSection" style="display:none;">
-            <label for="selectedProducts">Selected Products (comma-separated):</label>
-            <input type="text" id="selectedProducts">
+        <div id="productsSection">
+            <p class="instruction">Please select exactly 5 products:</p>
+            <div class="carousel" id="productCarousel"></div>
+            <div id="selectionError" class="error"></div>
         </div>
 
         <div id="metadataSection" style="display:none;">
-            <label for="age">Age:</label>
-            <input type="number" id="age">
-
-            <label for="gender">Gender:</label>
-            <select id="gender">
-                <option value="">Select...</option>
-                <option value="male">Male</option>
-                <option value="female">Female</option>
-                <option value="other">Other</option>
-            </select>
-
-            <label for="location">Location:</label>
-            <input type="text" id="location">
+            <p class="instruction">Please provide the following metadata:</p>
+            <input type="number" id="age" placeholder="Age">
+            <input type="number" id="customerTenure" placeholder="Customer Tenure">
+            <input type="number" id="income" placeholder="Income">
         </div>
 
-        <button type="submit">Get Recommendations</button>
-    </form>
+        <button id="recommendButton" onclick="getRecommendations()" disabled>Get Recommendations</button>
 
-    <div id="recommendations"></div>
+        <div id="recommendations"></div>
+    </div>
 
     <script>
-        $(document).ready(function() {
-            $('#requestType').change(function() {
-                const type = $(this).val();
-                $('#productsSection').toggle(type === 'products' || type === 'both');
-                $('#metadataSection').toggle(type === 'metadata' || type === 'both');
-            });
+        const apiUrl = 'https://2bnutzs9il.execute-api.us-east-1.amazonaws.com/prod/recommend'; // Replace with your actual API Gateway URL
 
-            $('#recommenderForm').submit(function(e) {
-                e.preventDefault();
-                const userId = $('#userId').val();
-                const requestType = $('#requestType').val();
-                const selectedProducts = $('#selectedProducts').val().split(',').map(p => p.trim());
-                const metadata = {
-                    age: $('#age').val(),
-                    gender: $('#gender').val(),
-                    location: $('#location').val()
-                };
+        const product_descriptions = {
+            'ind_ahor_fin_ult1': 'Savings',
+            'ind_aval_fin_ult1': 'Guarantees',
+            'ind_cco_fin_ult1': 'CurrentAccount',
+            'ind_cder_fin_ult1': 'Derivatives',
+            'ind_cno_fin_ult1': 'PayrollAccount',
+            'ind_ctju_fin_ult1': 'JuniorAccount',
+            'ind_ctma_fin_ult1': 'MasAccount',
+            'ind_ctop_fin_ult1': 'ParticularAccount',
+            'ind_ctpp_fin_ult1': 'ParticularPlusAccount',
+            'ind_deco_fin_ult1': 'ShortDeposit',
+            'ind_deme_fin_ult1': 'MediumDeposit',
+            'ind_dela_fin_ult1': 'LongDeposit',
+            'ind_ecue_fin_ult1': 'eAccount',
+            'ind_fond_fin_ult1': 'Funds',
+            'ind_hip_fin_ult1': 'Mortgage',
+            'ind_plan_fin_ult1': 'Pensions',
+            'ind_pres_fin_ult1': 'Loans',
+            'ind_reca_fin_ult1': 'Taxes',
+            'ind_tjcr_fin_ult1': 'CreditCard',
+            'ind_valo_fin_ult1': 'Securities',
+            'ind_viv_fin_ult1': 'HomeAccount',
+            'ind_nomina_ult1': 'Payroll',
+            'ind_nom_pens_ult1': 'PensionPayments',
+            'ind_recibo_ult1': 'DirectDebit'
+        };
 
-                const data = {
-                    userId: userId,
-                    type: requestType,
-                    selectedProducts: selectedProducts,
-                    metadata: metadata
-                };
+        // Populate product carousel
+        const carousel = document.getElementById('productCarousel');
+        Object.entries(product_descriptions).forEach(([id, name]) => {
+            const product = document.createElement('div');
+            product.className = 'product';
+            product.innerHTML = `
+                <div class="product-name">${name}</div>
+                <div class="product-id">${id}</div>
+            `;
+            product.onclick = () => {
+                product.classList.toggle('selected');
+                updateSelectedProducts();
+            };
+            carousel.appendChild(product);
+        });
 
-                $.ajax({
-                    url: 'INSERT_YOUR_API_ADDRESS_HERE',
-                    type: 'POST',
-                    data: JSON.stringify(data),
-                    contentType: 'application/json',
-                    crossDomain: true,
-                    xhrFields: {
-                        withCredentials: false
-                    },
-                    success: function(response) {
-                        $('#recommendations').html('<p>Recommendations request submitted. Check your DynamoDB table for results.</p>');
-                    },
-                    error: function(xhr, status, error) {
-                        $('#recommendations').html('<p>Error: ' + error + '</p>');
-                    }
+        function updateSelectedProducts() {
+            const selectedProducts = document.querySelectorAll('.product.selected');
+            const recommendButton = document.getElementById('recommendButton');
+            const selectionError = document.getElementById('selectionError');
+            
+            if (selectedProducts.length === 5) {
+                recommendButton.disabled = false;
+                selectionError.textContent = '';
+            } else {
+                recommendButton.disabled = true;
+                selectionError.textContent = `Please select exactly 5 products. Currently selected: ${selectedProducts.length}`;
+            }
+        }
+
+        // Handle request type selection
+        document.querySelectorAll('input[name="requestType"]').forEach(radio => {
+            radio.addEventListener('change', function() {
+                document.querySelectorAll('.request-type label').forEach(label => {
+                    label.classList.remove('active');
                 });
+                this.parentElement.classList.add('active');
+                document.getElementById('productsSection').style.display = 
+                    (this.value === 'products' || this.value === 'both') ? 'block' : 'none';
+                document.getElementById('metadataSection').style.display = 
+                    (this.value === 'metadata' || this.value === 'both') ? 'block' : 'none';
+                updateSelectedProducts();
             });
         });
+
+        // Set initial active state
+        document.querySelector('input[name="requestType"]:checked').parentElement.classList.add('active');
+
+        async function getRecommendations() {
+            const requestType = document.querySelector('input[name="requestType"]:checked').value;
+            const selectedProducts = Array.from(document.querySelectorAll('.product.selected')).map(p => p.querySelector('.product-id').textContent);
+            const age = document.getElementById('age').value;
+            const customerTenure = document.getElementById('customerTenure').value;
+            const income = document.getElementById('income').value;
+
+            const payload = {
+                userId: 'anonymous',
+                requestType: requestType,
+                selectedProducts: selectedProducts,
+                metadata: {
+                    age: parseInt(age) || null,
+                    customerTenure: parseInt(customerTenure) || null,
+                    income: parseInt(income) || null
+                }
+            };
+
+            const recommendationsDiv = document.getElementById('recommendations');
+            recommendationsDiv.innerHTML = '<div class="spinner"></div><div class="loading-text">Getting recommendations...</div>';
+
+            try {
+                const response = await axios.post(apiUrl, payload);
+                displayRecommendations(response.data, selectedProducts);
+            } catch (error) {
+                console.error('Error:', error);
+                recommendationsDiv.innerHTML = 'Error getting recommendations. Please try again.';
+            }
+        }
+
+        function displayRecommendations(recommendations, selectedProducts) {
+            const recommendationsDiv = document.getElementById('recommendations');
+            if (Array.isArray(recommendations) && recommendations.length > 0) {
+                const filteredRecommendations = recommendations
+                    .filter(item => !selectedProducts.includes(item.itemId))
+                    .slice(0, 10);
+                
+                const list = filteredRecommendations.map((item, index) => `
+                    <li>
+                        <strong>${product_descriptions[item.itemId] || item.itemId}</strong>
+                    </li>
+                `).join('');
+                recommendationsDiv.innerHTML = `<h2>Top 10 Recommendations:</h2><ol>${list}</ol>`;
+            } else {
+                recommendationsDiv.innerHTML = 'No recommendations available.';
+            }
+        }
     </script>
 </body>
 </html>

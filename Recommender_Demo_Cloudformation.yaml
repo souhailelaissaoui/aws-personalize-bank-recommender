@@ -8,6 +8,13 @@ Parameters:
   BucketName:
     Type: String
     Description: Name of the S3 bucket to host the website
+  UsersDatasetArn:
+    Type: String
+    Description: The ARN of your Users dataset in Amazon Personalize
+  TrackingId:
+    Type: String
+    Description: The tracking ID for your Amazon Personalize event tracker
+
 
 Resources:
   # DynamoDB Table
@@ -44,6 +51,8 @@ Resources:
               - Effect: Allow
                 Action:
                   - personalize:GetRecommendations
+                  - personalize:PutUsers
+                  - personalize:PutEvents
                 Resource: '*'
         - PolicyName: DynamoDBAccess
           PolicyDocument:
@@ -60,6 +69,15 @@ Resources:
               - Effect: Allow
                 Action:
                   - states:StartExecution
+                  - states:DescribeExecution
+                Resource: '*'
+        - PolicyName: LambdaInvokeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
                 Resource: '*'
 
   StepFunctionsExecutionRole:
@@ -97,7 +115,10 @@ Resources:
           def handler(event, context):
               # Process input data
               return {
-                  'userId': event['userId']
+                  'userId': event['userId'],
+                  'requestType': event['requestType'],
+                  'selectedProducts': event.get('selectedProducts', []),
+                  'metadata': event.get('metadata', {})
               }
 
   RecommendationFunction:
@@ -112,19 +133,52 @@ Resources:
         ZipFile: |
           import boto3
           import os
+          import json
+          from datetime import datetime
+          import uuid
           def handler(event, context):
               personalize_runtime = boto3.client('personalize-runtime')
+              userId = str(uuid.uuid4())
+              
+              # Handle different request types
+              if event['requestType'] == 'products' or event['requestType'] == 'both':
+                  # Record user interactions
+                  personalize_events = boto3.client('personalize-events')
+                  for item in event['selectedProducts']:
+                      personalize_events.put_events(
+                          trackingId=os.environ['TRACKING_ID'],
+                          userId=userId,
+                          sessionId='recommender_session',
+                          eventList=[{
+                              'eventType': 'purchase',
+                              'itemId': item,
+                              'sentAt': datetime.now().timestamp()
+                          }]
+                      )
+              
+              if event['requestType'] == 'metadata' or event['requestType'] == 'both':
+                  # Add user to dataset
+                  personalize_events = boto3.client('personalize-events')
+                  users_dataset_arn = os.environ['USERS_DATASET_ARN']
+                  personalize_events.put_users(
+                      datasetArn=users_dataset_arn,
+                      users=[{
+                          'userId': userId,
+                          'properties': json.dumps(event['metadata'])
+                      }]
+                  )
+              
+              # Get recommendations
               response = personalize_runtime.get_recommendations(
                   campaignArn=os.environ['PERSONALIZE_CAMPAIGN_ARN'],
-                  userId=event['userId']
+                  userId=userId
               )
-              return {
-                  'UserId': event['userId'],
-                  'recommendations': response['itemList']
-              }
+              return response['itemList']
       Environment:
         Variables:
           PERSONALIZE_CAMPAIGN_ARN: !Ref PersonalizeCampaignArn
+          TRACKING_ID: !Ref TrackingId
+          USERS_DATASET_ARN: !Ref UsersDatasetArn
 
   WriteToDynamoDBFunction:
     Type: AWS::Lambda::Function
@@ -138,6 +192,7 @@ Resources:
         ZipFile: |
           import boto3
           import json
+          import os
           from decimal import Decimal
 
           def float_to_decimal(obj):
@@ -151,16 +206,44 @@ Resources:
 
           def handler(event, context):
               dynamodb = boto3.resource('dynamodb')
-              table = dynamodb.Table('PersonalizeRecommendations')
+              table = dynamodb.Table(os.environ['DYNAMODB_TABLE_NAME'])
+              
+              # Handle the case where event is a list of recommendations
+              if isinstance(event, list):
+                  recommendations = event
+                  user_id = context.invoked_function_arn.split(':')[-1]  # Use function name as a placeholder user ID
+              else:
+                  recommendations = event.get('recommendations', [])
+                  user_id = event.get('userId', 'unknown')
+
+              # Format the recommendations
+              formatted_recommendations = [
+                  {
+                      'itemId': item['itemId'],
+                      'score': float(item['score'])
+                  }
+                  for item in recommendations
+              ]
+
+              # Create the item to be inserted
+              item = {
+                  'UserId': user_id,
+                  'recommendations': formatted_recommendations
+              }
               
               # Convert any float values to Decimal
-              item = float_to_decimal(event)
+              item = float_to_decimal(item)
               
+              # Insert the item into DynamoDB
               table.put_item(Item=item)
+              
               return {
                   'statusCode': 200,
-                  'body': json.dumps('Recommendations written to DynamoDB')
+                  'body': json.dumps(event)
               }
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref RecommendationsTable
 
   # Step Functions State Machine
   RecommenderStateMachine:
@@ -210,11 +293,13 @@ Resources:
       Runtime: python3.8
       Handler: index.handler
       Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 180
       Code:
         ZipFile: |
           import json
           import boto3
           import os
+          import time
 
           def handler(event, context):
               # For preflight OPTIONS request
@@ -230,36 +315,59 @@ Resources:
                   }
 
               # Extract data from the event
-              body = json.loads(event['body']) if event.get('body') else {}
-              request_type = body.get('type')
-              user_id = body.get('userId')
-              selected_products = body.get('selectedProducts', [])
-              metadata = body.get('metadata', {})
-
-              # Prepare input for Step Functions
-              step_functions_input = {
-                  'userId': user_id,
-                  'selectedProducts': selected_products,
-                  'metadata': metadata,
-                  'requestType': request_type
-              }
-
+              body = json.loads(event['body'])
+              
               # Start Step Functions execution
               step_functions = boto3.client('stepfunctions')
               response = step_functions.start_execution(
                   stateMachineArn=os.environ['STEP_FUNCTIONS_ARN'],
-                  input=json.dumps(step_functions_input)
+                  input=json.dumps(body)
               )
 
-              return {
-                  'statusCode': 200,
-                  'body': json.dumps('Recommendation process started'),
-                  'headers': {
-                      'Access-Control-Allow-Origin': '*',
-                      'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
-                      'Access-Control-Allow-Methods': 'OPTIONS,POST'
-                  }
-              }
+              # Get the execution ARN
+              execution_arn = response['executionArn']
+
+              # Wait for the execution to complete (with timeout)
+              max_wait_time = 25  # seconds
+              start_time = time.time()
+              while True:
+                  if time.time() - start_time > max_wait_time:
+                      return {
+                          'statusCode': 504,
+                          'body': json.dumps('Execution timed out'),
+                          'headers': {
+                              'Access-Control-Allow-Origin': '*',
+                              'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+                              'Access-Control-Allow-Methods': 'OPTIONS,POST'
+                          }
+                      }
+
+                  execution = step_functions.describe_execution(executionArn=execution_arn)
+                  if execution['status'] == 'SUCCEEDED':
+                      # Parse the output
+                      output = json.loads(execution['output'])
+                      recommendations = output.get('body', '[]')  # Get the body or empty list
+                      return {
+                          'statusCode': 200,
+                          'body': recommendations,
+                          'headers': {
+                              'Access-Control-Allow-Origin': '*',
+                              'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+                              'Access-Control-Allow-Methods': 'OPTIONS,POST'
+                          }
+                      }
+                  elif execution['status'] in ['FAILED', 'TIMED_OUT', 'ABORTED']:
+                      return {
+                          'statusCode': 500,
+                          'body': json.dumps('Execution failed'),
+                          'headers': {
+                              'Access-Control-Allow-Origin': '*',
+                              'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+                              'Access-Control-Allow-Methods': 'OPTIONS,POST'
+                          }
+                      }
+                  
+                  time.sleep(0.5)  # Wait for 500ms before checking again
       Environment:
         Variables:
           STEP_FUNCTIONS_ARN: !Ref RecommenderStateMachine
@@ -339,6 +447,7 @@ Resources:
   WebsiteBucket:
     Type: AWS::S3::Bucket
     Properties:
+      BucketName: !Ref BucketName
       PublicAccessBlockConfiguration:
         BlockPublicAcls: false
         BlockPublicPolicy: false
